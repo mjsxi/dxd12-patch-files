@@ -37,6 +37,8 @@ included in the universal Unloaded-II package.
 - owns borrowed COM references;
 - waits for GPU fences before recycling or releasing render resources;
 - rebuilds renderer resources after resize or swapchain replacement; and
+- binds ImGui's font and texture descriptors from the same shader-visible heap
+  used by the draw command list; and
 - contains managed exceptions before they can cross native hook callbacks.
 
 No other Faith Framework file is replaced.

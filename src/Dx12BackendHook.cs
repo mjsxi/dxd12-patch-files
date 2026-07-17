@@ -484,7 +484,12 @@ public unsafe class DX12BackendHook : IBackendHook
         var descriptorImGuiRender = new DescriptorHeapDescription
         {
             Type = DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
-            DescriptorCount = 11,
+            // ImGui 1.92 allocates its font texture through the descriptor
+            // callbacks below. Faith previously allocated that descriptor
+            // from a separate 2048-entry heap while binding this 11-entry
+            // heap for rendering, so every ImGui primitive sampled an
+            // unbound descriptor and remained invisible.
+            DescriptorCount = 2048,
             Flags = DescriptorHeapFlags.ShaderVisible
         };
 
@@ -497,6 +502,11 @@ public unsafe class DX12BackendHook : IBackendHook
                 return false;
             }
             _shaderResourceViewDescHeap.Name = $"[{nameof(DX12BackendHook)}] ShaderResourceViewDescHeap";
+
+            // The heap passed to ImGui, used by its allocation callbacks, and
+            // bound on the command list must be the same shader-visible heap.
+            _textureHeapAllocator = new DescriptorHeapAllocator();
+            _textureHeapAllocator.Create(Device, _shaderResourceViewDescHeap);
         }
 
         // Create RTV Heap
@@ -534,20 +544,6 @@ public unsafe class DX12BackendHook : IBackendHook
             CPUPageProperty = CpuPageProperty.Unknown,
             MemoryPoolPreference = MemoryPool.Unknown
         };
-
-        // Create our texture heap allocator/pool, for ImGui textures
-        if (_textureHeapAllocator is null)
-        {
-            _textureHeapAllocator = new DescriptorHeapAllocator();
-            var heap = Device.CreateDescriptorHeap(new DescriptorHeapDescription()
-            {
-                DescriptorCount = 2048,
-                Type = DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
-                Flags = DescriptorHeapFlags.ShaderVisible,
-            });
-            heap.Name = $"[{nameof(DX12BackendHook)}] Texture Descriptor Heap";
-            _textureHeapAllocator.Create(Device, heap);
-        }
 
         var initInfo = new ImGui_ImplDX12_InitInfo_t
         {
@@ -763,7 +759,7 @@ public unsafe class DX12BackendHook : IBackendHook
 
         _textureHeapAllocator?.Destroy();
         _textureHeapAllocator = null!;
-        _shaderResourceViewDescHeap?.Dispose();
+        // DescriptorHeapAllocator owns and has disposed the shared heap.
         _shaderResourceViewDescHeap = null!;
 
         _textureUploadCommandAllocator?.Dispose();
