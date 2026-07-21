@@ -329,6 +329,9 @@ public unsafe class DX12BackendHook : IBackendHook
     private static extern nuint VirtualQuery(
         nint address, out MemoryBasicInformation buffer, nuint length);
 
+    [DllImport("user32.dll")]
+    private static extern bool DestroyWindow(nint hWnd);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MemoryBasicInformation
     {
@@ -400,7 +403,7 @@ public unsafe class DX12BackendHook : IBackendHook
             }
             finally
             {
-                PInvoke.DestroyWindow(hwnd);
+                DestroyWindow(hwnd);
             }
         }
     }

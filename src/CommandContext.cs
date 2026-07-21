@@ -2,6 +2,8 @@
 
 using Microsoft.Win32.SafeHandles;
 
+using NenTools.ImGui.Hooks.DirectX;
+
 using Vortice.Direct3D12;
 using Windows.Win32;
 
