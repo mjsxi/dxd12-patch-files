@@ -13,6 +13,8 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
+using Microsoft.Win32.SafeHandles;
+
 using Windows.Win32;
 using Windows.Win32.Foundation;
 using Windows.Win32.UI.WindowsAndMessaging;
@@ -87,9 +89,10 @@ public unsafe class DX12BackendHook : IBackendHook
     private ID3D12GraphicsCommandList _textureUploadCommandList;
     private ID3D12CommandQueue _textureUploadCommandQueue;
     private ID3D12Fence _textureUploadFence;
+    private SafeFileHandle _textureUploadEvent;
     private ulong _fenceValue;
 
-    private static DescriptorHeapAllocator _textureHeapAllocator;
+    private DescriptorHeapAllocator _textureHeapAllocator;
     private ConcurrentDictionary<ulong, TextureResource> _textureIds = [];
 
     public void* _imGuiBackendRendererData;
@@ -107,7 +110,7 @@ public unsafe class DX12BackendHook : IBackendHook
     /// <summary>
     /// Contains the DX12 DXGI Command Queue VTable.
     /// </summary>
-    public static IVirtualFunctionTable ComamndQueueVTable { get; private set; }
+    public static IVirtualFunctionTable CommandQueueVTable { get; private set; }
 
     public DX12BackendHook()
     {
@@ -228,7 +231,7 @@ public unsafe class DX12BackendHook : IBackendHook
 
             FactoryVTable = SDK.Hooks.VirtualFunctionTableFromObject(factory.NativePointer, Enum.GetNames<IDXGIFactoryVTable>().Length);
             SwapchainVTable = SDK.Hooks.VirtualFunctionTableFromObject(swapChain.NativePointer, Enum.GetNames<IDXGISwapChainVTable>().Length);
-            ComamndQueueVTable = SDK.Hooks.VirtualFunctionTableFromObject(commandQueue.NativePointer, Enum.GetNames<ID3D12CommandQueueVTable>().Length);
+            CommandQueueVTable = SDK.Hooks.VirtualFunctionTableFromObject(commandQueue.NativePointer, Enum.GetNames<ID3D12CommandQueueVTable>().Length);
 
             DebugLog.WriteLine($"[{nameof(DX12BackendHook)}] Swapchain command queue layout: {_queueLocation}");
 
@@ -390,10 +393,14 @@ public unsafe class DX12BackendHook : IBackendHook
                 swapChain = factory.CreateSwapChainForHwnd(commandQueue, hwnd, swapChainDesc, null, null);
                 return true;
             }
-            catch (Exception ex)
+            catch
             {
                 swapChain = null;
                 return false;
+            }
+            finally
+            {
+                PInvoke.DestroyWindow(hwnd);
             }
         }
     }
@@ -403,7 +410,7 @@ public unsafe class DX12BackendHook : IBackendHook
     /// </summary>
     public void InitAndEnableHooks()
     {
-        if (_queueLocation is null || SwapchainVTable is null || ComamndQueueVTable is null)
+        if (_queueLocation is null || SwapchainVTable is null || CommandQueueVTable is null)
             CreateDummySwapchainAndFindVTables();
 
         // Got our pointers, start hooking functions.
@@ -432,7 +439,7 @@ public unsafe class DX12BackendHook : IBackendHook
             nuint resizePointerAddr = (nuint)SwapchainVTable[(int)IDXGISwapChainVTable.ResizeBuffers].EntryAddress;
             _resizeBuffersHook = new FunctionPointerHook<ResizeBuffersDelegate>(resizePointerAddr, ResizeBuffersImpl).Activate();
 
-            nuint executePointerAddr = (nuint)ComamndQueueVTable[(int)ID3D12CommandQueueVTable.ExecuteCommandLists].EntryAddress;
+            nuint executePointerAddr = (nuint)CommandQueueVTable[(int)ID3D12CommandQueueVTable.ExecuteCommandLists].EntryAddress;
             _executeCommandListsHook = new FunctionPointerHook<ExecuteCommandListsDelegate>(executePointerAddr, ExecuteCommandListsImpl).Activate();
         }
     }
@@ -537,13 +544,6 @@ public unsafe class DX12BackendHook : IBackendHook
             Device.CreateRenderTargetView(_frameContexts[(int)i].MainRenderTargetResource, null, rtvHandle);
             rtvHandle.Ptr += rtvDescriptorSize;
         }
-
-        var props = new HeapProperties()
-        {
-            Type = HeapType.Default,
-            CPUPageProperty = CpuPageProperty.Unknown,
-            MemoryPoolPreference = MemoryPool.Unknown
-        };
 
         var initInfo = new ImGui_ImplDX12_InitInfo_t
         {
@@ -770,6 +770,8 @@ public unsafe class DX12BackendHook : IBackendHook
         _textureUploadCommandQueue = null!;
         _textureUploadFence?.Dispose();
         _textureUploadFence = null!;
+        _textureUploadEvent?.Dispose();
+        _textureUploadEvent = null!;
         _fenceValue = 0;
     }
 
@@ -843,7 +845,7 @@ public unsafe class DX12BackendHook : IBackendHook
             return;
 
         // Triple buffer
-        CommandContext commandContext = _commandContexts[_commandContextIndex++ % _commandContexts.Count];
+        CommandContext commandContext = _commandContexts[(int)((uint)_commandContextIndex++ % (uint)_commandContexts.Count)];
 
         if (SwapChain.CurrentBackBufferIndex >= _frameContexts.Count)
             return;
@@ -921,12 +923,12 @@ public unsafe class DX12BackendHook : IBackendHook
 
     public void SrvDescriptorAllocCallback(ImGui_ImplDX12_InitInfo_t* initInfo, CpuDescriptorHandle* cpuHandle, GpuDescriptorHandle* gpuHandle)
     {
-        _textureHeapAllocator.Alloc(ref *cpuHandle, ref *gpuHandle);
+        _textureHeapAllocator?.Alloc(ref *cpuHandle, ref *gpuHandle);
     }
 
     public void SrvDescriptorFreeCallback(ImGui_ImplDX12_InitInfo_t* a, CpuDescriptorHandle cpuHandle, GpuDescriptorHandle gpuHandle)
     {
-        _textureHeapAllocator.Free(cpuHandle, gpuHandle);
+        _textureHeapAllocator?.Free(cpuHandle, gpuHandle);
     }
 
     #region Texture Work
@@ -947,7 +949,7 @@ public unsafe class DX12BackendHook : IBackendHook
         ID3D12Resource pTexture = Device.CreateCommittedResource(heapProperties, HeapFlags.None, imageDesc, ResourceStates.CopyDest);
 
         var uploadBufferHeapDesc = new HeapProperties(HeapType.Upload);
-        uint uploadPitch = (uint)(imageWidth * BytesPerPixel + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u));
+        uint uploadPitch = (uint)((imageWidth * BytesPerPixel + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u));
         uint uploadSize = imageHeight * uploadPitch;
 
         var tempDesc = new ResourceDescription(ResourceDimension.Buffer, 0, uploadSize, 1, 1, 1, Format.Unknown, 1, 0, TextureLayout.RowMajor, ResourceFlags.None);
@@ -962,7 +964,9 @@ public unsafe class DX12BackendHook : IBackendHook
         nint mapped = 0;
         if (!uploadBuffer.Map(0, range, &mapped).Success)
         {
-            ;
+            uploadBuffer.Dispose();
+            pTexture.Dispose();
+            throw new Exception("Failed to map texture upload buffer.");
         }
 
         fixed (byte* imageData = bytes)
@@ -1089,13 +1093,15 @@ public unsafe class DX12BackendHook : IBackendHook
         _textureUploadCommandQueue ??= Device.CreateCommandQueue(CommandListType.Direct);
 
         _textureUploadFence ??= Device.CreateFence(0, FenceFlags.None);
+        _textureUploadEvent ??= PInvoke.CreateEvent(null, false, false, (string)null);
         ulong signal = ++_fenceValue;
 
         _textureUploadCommandQueue.ExecuteCommandList(_textureUploadCommandList);
         _textureUploadCommandQueue.Signal(_textureUploadFence, signal);
 
-        _textureUploadFence.SetEventOnCompletion(signal);
-        //fence.CompletedValue = signal;
+        _textureUploadFence.SetEventOnCompletion(signal, _textureUploadEvent.DangerousGetHandle());
+        PInvoke.WaitForSingleObject(_textureUploadEvent, 0xFFFFFFFF);
+        PInvoke.ResetEvent(_textureUploadEvent);
 
         upload.Dispose();
         _textureUploadCommandAllocator.Reset();

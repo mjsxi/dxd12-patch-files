@@ -1,9 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection.Metadata;
-using System.Text;
-using System.Threading.Tasks;
 
 using Microsoft.Win32.SafeHandles;
 
@@ -27,9 +22,7 @@ internal class CommandContext
 
     public bool Setup(DX12BackendHook hook)
     {
-        CommandAllocator?.Dispose();
-        CommandList?.Dispose();
-        Fence?.Dispose();
+        Reset();
 
         var device = hook.Device;
 
@@ -37,48 +30,22 @@ internal class CommandContext
         {
             CommandAllocator = device.CreateCommandAllocator(CommandListType.Direct);
             CommandAllocator.Name = $"[{nameof(DX12BackendHook)}] ImGui Command Allocator";
-        }
-        catch (Exception)
-        {
-            Console.WriteLine("Failed to create command allocator");
-            return false;
-        }
 
-        try
-        {
             CommandList = device.CreateCommandList<ID3D12GraphicsCommandList>(CommandListType.Direct, CommandAllocator);
             CommandList.Name = $"[{nameof(DX12BackendHook)}] ImGui CommandList";
-        }
-        catch (Exception)
-        {
-            Console.WriteLine("Failed to create command list");
-            return false;
-        }
 
-        try
-        {
             Fence = device.CreateFence(FenceValue, FenceFlags.None);
             Fence.Name = $"[{nameof(DX12BackendHook)}] ImGui Command Context Fence";
 
-            
-        }
-        catch (Exception)
-        {
-            Console.WriteLine("Failed to create fence");
-            return false;
-        }
-
-        try
-        {
             FenceEvent = PInvoke.CreateEvent(null, false, false, (string)null);
+            return true;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            Console.WriteLine("Failed to create fence event");
+            DebugLog.WriteLine($"[{nameof(DX12BackendHook)}] Failed to create command context: {ex.Message}");
+            Reset();
             return false;
         }
-
-        return true;
     }
 
     public void Wait(uint timeoutMilliseconds = 5000)
@@ -130,6 +97,7 @@ internal class CommandContext
             FenceEvent?.Dispose();
             FenceEvent = null;
             WaitingForFence = false;
+            HasCommands = false;
         }
     }
 }
